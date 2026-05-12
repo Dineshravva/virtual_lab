@@ -15,6 +15,8 @@ import DataExportPanel from './components/DataExportPanel';
 import TemplateLibraryPanel from './components/TemplateLibraryPanel';
 import ExperimentLibrary from './components/ExperimentLibrary';
 import ToolsDrawer from './components/ToolsDrawer';
+import PlaneControlsPanel from './components/PlaneControlsPanel';
+import DistancePositionPanel from './components/DistancePositionPanel';
 import ToastContainer from './components/ToastContainer';
 import useSocket, { useSocketStatus } from './hooks/useSocket';
 import { askLabAssistant, saveExperiment } from './services/api';
@@ -65,6 +67,9 @@ function App() {
   }, []);
   const handleAddCircle = useCallback(() => {
     if (canvasRef.current) canvasRef.current.addCircle();
+  }, []);
+  const handleAddPlane = useCallback(() => {
+    if (canvasRef.current) canvasRef.current.addPlane();
   }, []);
   const handleTogglePolygonTool = useCallback(() => {
     setActiveTool((current) => (current === 'polygon' ? 'select' : 'polygon'));
@@ -370,6 +375,10 @@ function App() {
         handleAddCircle();
         return;
       }
+      if (key === 'p') {
+        handleAddPlane();
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         if (isPaused) {
@@ -391,6 +400,7 @@ function App() {
   }, [
     handleAddBox,
     handleAddCircle,
+    handleAddPlane,
     handleDeleteSelected,
     handlePause,
     handlePlay,
@@ -412,6 +422,7 @@ function App() {
         connectionStatus={connectionStatus}
         onAddBox={handleAddBox}
         onAddCircle={handleAddCircle}
+        onAddPlane={handleAddPlane}
         onTogglePolygonTool={handleTogglePolygonTool}
         onFinishPolygon={handleFinishPolygon}
         onCancelPolygon={handleCancelPolygon}
@@ -472,6 +483,18 @@ function App() {
             onApply={handleApplyToBody}
             onStopContinuous={handleStopContinuous}
             activeForceId={activeForceId}
+          />
+          <PlaneControlsPanel
+            selectedBody={selectedBody}
+            canvasRef={canvasRef}
+          />
+          <DistancePositionPanel
+            canvasRef={canvasRef}
+            bodies={bodies}
+            selectedBody={selectedBody}
+            onNotify={notify}
+            activeTool={activeTool}
+            onActiveToolChange={setActiveTool}
           />
           <AnalyticsDashboard
             bodies={bodies}

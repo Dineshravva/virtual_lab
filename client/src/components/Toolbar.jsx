@@ -6,6 +6,7 @@ import ConnectionStatus from './ConnectionStatus';
 export default function Toolbar({
   onAddBox,
   onAddCircle,
+  onAddPlane,
   onTogglePolygonTool,
   onFinishPolygon,
   onCancelPolygon,
@@ -105,6 +106,16 @@ export default function Toolbar({
             </Tooltip>
           </>
         )}
+        <Tooltip text="Plane: a static rigid surface that acts as a floor, ramp, or wall. Other objects collide against it realistically.">
+          <button
+            type="button"
+            onClick={onAddPlane}
+            className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-white rounded-md
+                       text-sm border border-gray-700 transition"
+          >
+            + Plane
+          </button>
+        </Tooltip>
         <Tooltip text="Pause: freezes time so positions, velocities, and energy can be inspected without motion continuing.">
           <button
             type="button"
