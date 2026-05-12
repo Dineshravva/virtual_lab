@@ -4,6 +4,7 @@ import Matter from 'matter-js';
 const BOX_COLOR = '#38bdf8';
 const CIRCLE_COLOR = '#f472b6';
 const POLYGON_COLOR = '#a3e635';
+const PLANE_COLOR = '#64748b';
 const STATIC_COLOR = '#1f2937';
 
 function applySerializedProperties(body, data) {
@@ -83,6 +84,35 @@ export function createPolygon(points, options = {}) {
   return body;
 }
 
+// Create a static rigid plane/floor at (x, y) with a given length, thickness, and angle.
+// The plane acts as an immovable surface that other bodies can collide with.
+export function createPlane(x, y, length = 200, angle = 0, options = {}) {
+  const PLANE_THICKNESS = 12;
+  const body = Matter.Bodies.rectangle(x, y, length, PLANE_THICKNESS, {
+    isStatic: true,
+    restitution: 0.3,
+    friction: 0.5,
+    frictionStatic: 0.6,
+    frictionAir: 0,
+    chamfer: { radius: 2 },
+    render: {
+      fillStyle: PLANE_COLOR,
+      strokeStyle: '#94a3b8',
+      lineWidth: 1
+    },
+    ...options
+  });
+  if (angle !== 0) {
+    Matter.Body.setAngle(body, (angle * Math.PI) / 180);
+  }
+  body.shapeType = 'plane';
+  body.planeLength = length;
+  body.planeAngle = angle;
+  body.planeLocked = false;
+  body.baseFillStyle = PLANE_COLOR;
+  return body;
+}
+
 // Build the four static walls around the canvas so bodies stay visible.
 export function createWalls(width, height, thickness = 50) {
   const opts = { isStatic: true, render: { fillStyle: STATIC_COLOR } };
@@ -120,13 +150,29 @@ export function serializeBody(body) {
     }));
   }
 
+  if (type === 'plane') {
+    serialized.planeLength = body.planeLength || 200;
+    serialized.planeAngle = body.planeAngle || 0;
+    serialized.planeLocked = !!body.planeLocked;
+  }
+
   return serialized;
 }
 
 // Inverse of serializeBody: rebuild a Matter body from plain JSON.
 export function deserializeBody(data) {
   let body;
-  if (data.type === 'polygon' && data.vertices && data.vertices.length >= 3) {
+  if (data.type === 'plane') {
+    body = createPlane(
+      data.x,
+      data.y,
+      data.planeLength || data.width || 200,
+      data.planeAngle || 0
+    );
+    body.planeLocked = !!data.planeLocked;
+    applySerializedProperties(body, data);
+    return body;
+  } else if (data.type === 'polygon' && data.vertices && data.vertices.length >= 3) {
     const points = data.vertices.map((vertex) => ({
       x: data.x + vertex.x,
       y: data.y + vertex.y

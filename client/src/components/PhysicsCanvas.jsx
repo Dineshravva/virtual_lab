@@ -11,6 +11,7 @@ import {
   createBox,
   createCircle,
   createPolygon,
+  createPlane,
   serializeBody,
   deserializeBody
 } from '../utils/physicsHelpers';
@@ -543,6 +544,157 @@ function drawForcePreview(ctx, body, preview) {
   ctx.restore();
 }
 
+// Draw visual overlay on plane bodies — angle label, lock indicator, drag handle
+function drawPlaneOverlays(ctx, bodyMap) {
+  ctx.save();
+  Object.values(bodyMap).forEach((body) => {
+    if (body.shapeType !== 'plane') return;
+
+    const x = body.position.x;
+    const y = body.position.y;
+    const angleDeg = typeof body.planeAngle === 'number' ? body.planeAngle : 0;
+    const isLocked = !!body.planeLocked;
+    const isSelected = body.render.lineWidth > 0;
+
+    // Draw angle label
+    ctx.font = '10px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = isLocked ? '#94a3b8' : '#e2e8f0';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+    ctx.shadowBlur = 3;
+    ctx.fillText(`${angleDeg.toFixed(0)}°`, x, y - 12);
+    ctx.shadowBlur = 0;
+
+    // Draw lock icon if locked
+    if (isLocked) {
+      const iconX = x + (body.planeLength || 200) / 2 * Math.cos(body.angle) + 14;
+      const iconY = y + (body.planeLength || 200) / 2 * Math.sin(body.angle) - 2;
+      ctx.fillStyle = '#f59e0b';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('🔒', iconX, iconY);
+    }
+
+    // Highlight selection with a glow
+    if (isSelected && !isLocked) {
+      ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      const hw = (body.planeLength || 200) / 2 + 6;
+      const hh = 12;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(body.angle);
+      ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+      ctx.restore();
+      ctx.setLineDash([]);
+    }
+  });
+  ctx.restore();
+}
+
+// Draw distance guide lines when the distance positioning tool is active.
+// Shows a line between reference and target bodies with dx/dy labels.
+function drawDistanceGuide(ctx, guide, bodyMap) {
+  if (!guide) return;
+  const refBody = guide.refId ? bodyMap[guide.refId] : null;
+  const tgtBody = guide.targetId ? bodyMap[guide.targetId] : null;
+  if (!refBody) return;
+
+  ctx.save();
+
+  // Highlight reference body with a cyan glow ring
+  ctx.strokeStyle = 'rgba(34, 211, 238, 0.6)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  if (refBody.circleRadius) {
+    ctx.arc(refBody.position.x, refBody.position.y, refBody.circleRadius + 8, 0, Math.PI * 2);
+  } else {
+    const hw = (refBody.bounds.max.x - refBody.bounds.min.x) / 2 + 6;
+    const hh = (refBody.bounds.max.y - refBody.bounds.min.y) / 2 + 6;
+    ctx.save();
+    ctx.translate(refBody.position.x, refBody.position.y);
+    ctx.rotate(refBody.angle || 0);
+    ctx.rect(-hw, -hh, hw * 2, hh * 2);
+    ctx.restore();
+  }
+  ctx.stroke();
+
+  // Label "REF"
+  ctx.fillStyle = '#22d3ee';
+  ctx.font = 'bold 9px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('REF', refBody.position.x, refBody.bounds.min.y - 10);
+
+  if (!tgtBody) {
+    ctx.restore();
+    return;
+  }
+
+  // Highlight target body with orange glow ring
+  ctx.strokeStyle = 'rgba(251, 146, 60, 0.6)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  if (tgtBody.circleRadius) {
+    ctx.arc(tgtBody.position.x, tgtBody.position.y, tgtBody.circleRadius + 8, 0, Math.PI * 2);
+  } else {
+    const hw = (tgtBody.bounds.max.x - tgtBody.bounds.min.x) / 2 + 6;
+    const hh = (tgtBody.bounds.max.y - tgtBody.bounds.min.y) / 2 + 6;
+    ctx.save();
+    ctx.translate(tgtBody.position.x, tgtBody.position.y);
+    ctx.rotate(tgtBody.angle || 0);
+    ctx.rect(-hw, -hh, hw * 2, hh * 2);
+    ctx.restore();
+  }
+  ctx.stroke();
+
+  // Label "TGT"
+  ctx.fillStyle = '#fb923c';
+  ctx.font = 'bold 9px Inter, system-ui, sans-serif';
+  ctx.fillText('TGT', tgtBody.position.x, tgtBody.bounds.min.y - 10);
+
+  // Draw dashed distance line
+  const ax = refBody.position.x;
+  const ay = refBody.position.y;
+  const bx = tgtBody.position.x;
+  const by = tgtBody.position.y;
+
+  ctx.strokeStyle = 'rgba(250, 204, 21, 0.7)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+
+  // Draw dx/dy labels at midpoint
+  const mx = (ax + bx) / 2;
+  const my = (ay + by) / 2;
+  const dxM = ((bx - ax) / 50).toFixed(1);
+  const dyM = ((by - ay) / 50).toFixed(1);
+  const distM = (Math.hypot(bx - ax, by - ay) / 50).toFixed(1);
+
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+  ctx.fillRect(mx - 46, my - 22, 92, 30);
+  ctx.strokeStyle = 'rgba(250, 204, 21, 0.4)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx - 46, my - 22, 92, 30);
+
+  ctx.fillStyle = '#fde68a';
+  ctx.font = '9px Inter, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`dx:${dxM}m dy:${dyM}m`, mx, my - 18);
+  ctx.fillText(`dist: ${distM} m`, mx, my - 6);
+
+  ctx.restore();
+}
+
 function getTouchCanvasPosition(touch, canvas) {
   const rect = canvas.getBoundingClientRect();
   return {
@@ -684,6 +836,12 @@ const PhysicsCanvas = forwardRef(
   const myIdRef = useRef(null);
   // Whether the Matter runner is currently stopped by the toolbar.
   const isPausedRef = useRef(false);
+  // The plane body the local user is currently repositioning, if any.
+  // Separate from draggedBodyRef to allow independent plane dragging logic.
+  const draggedPlaneRef = useRef(null);
+  const dragPlaneOffsetRef = useRef({ x: 0, y: 0 });
+  // Distance positioning tool: { refId, targetId } or null
+  const distanceGuideRef = useRef(null);
 
   // ---- Continuous force/velocity state ------------------------------------
   // Holds the current active continuous effect, if any. Shape:
@@ -1042,6 +1200,8 @@ const PhysicsCanvas = forwardRef(
       }
       drawPolygonDraft(ctx, polygonDraftRef.current);
       drawCollisionFlashes(ctx, collisionFlashRef.current);
+      drawPlaneOverlays(ctx, bodyMapRef.current);
+      drawDistanceGuide(ctx, distanceGuideRef.current, bodyMapRef.current);
 
       const preview = forcePreviewRef.current;
       if (preview && preview.networkId) {
@@ -2046,6 +2206,128 @@ const PhysicsCanvas = forwardRef(
       });
 
       notifyConstraintsChanged();
+    },
+
+    // ---- Plane management methods -----------------------------------------
+
+    addPlane: () => {
+      const x = CANVAS_WIDTH / 2;
+      const y = CANVAS_HEIGHT - 120;
+      const body = createPlane(x, y, 200, 0);
+      recordHistory();
+      const networkId = newNetworkId();
+      const ownerId = (socketRef.current && socketRef.current.id) || 'local';
+      registerBody(body, 'plane', networkId, ownerId);
+      setSelectedBody(networkId);
+      if (socketRef.current) {
+        socketRef.current.emit('add-body', {
+          ...serializeBody(body),
+          networkId,
+          ownerId
+        });
+      }
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
+      return networkId;
+    },
+
+    updatePlaneAngle: (networkId, angleDeg) => {
+      const body = bodyMapRef.current[networkId];
+      if (!body || body.shapeType !== 'plane' || body.planeLocked) return;
+      const clamped = Math.max(0, Math.min(90, Number(angleDeg) || 0));
+      body.planeAngle = clamped;
+      Matter.Body.setAngle(body, (clamped * Math.PI) / 180);
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
+    },
+
+    updatePlaneLength: (networkId, length) => {
+      const engine = engineRef.current;
+      const body = bodyMapRef.current[networkId];
+      if (!engine || !body || body.shapeType !== 'plane' || body.planeLocked) return;
+      const clampedLen = Math.max(60, Math.min(600, Number(length) || 200));
+      const pos = { x: body.position.x, y: body.position.y };
+      const angle = body.planeAngle || 0;
+      const locked = body.planeLocked;
+      const nid = body.networkId;
+      const oid = body.ownerId;
+
+      // Remove old body, create new one with updated length
+      Matter.World.remove(engine.world, body);
+      delete bodyMapRef.current[nid];
+
+      const newBody = createPlane(pos.x, pos.y, clampedLen, angle);
+      newBody.planeLocked = locked;
+      newBody.shapeType = 'plane';
+      newBody.networkId = nid;
+      newBody.ownerId = oid;
+      newBody.baseFillStyle = newBody.render.fillStyle;
+      Matter.World.add(engine.world, newBody);
+      bodyMapRef.current[nid] = newBody;
+
+      if (selectedBodyIdRef.current === nid) {
+        newBody.render.strokeStyle = '#facc15';
+        newBody.render.lineWidth = 4;
+      }
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
+    },
+
+    lockPlane: (networkId) => {
+      const body = bodyMapRef.current[networkId];
+      if (!body || body.shapeType !== 'plane') return;
+      body.planeLocked = true;
+      // Remove from mouse constraint interaction
+      body.collisionFilter = {
+        ...body.collisionFilter,
+        // Keep collision category but prevent mouse dragging
+        // by keeping it in group 0 (default) — we handle drag
+        // prevention in our mouse handlers instead
+      };
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
+    },
+
+    unlockPlane: (networkId) => {
+      const body = bodyMapRef.current[networkId];
+      if (!body || body.shapeType !== 'plane') return;
+      body.planeLocked = false;
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
+    },
+
+    getPlaneInfo: (networkId) => {
+      const body = bodyMapRef.current[networkId];
+      if (!body || body.shapeType !== 'plane') return null;
+      return {
+        networkId: body.networkId,
+        x: body.position.x,
+        y: body.position.y,
+        angle: body.planeAngle || 0,
+        length: body.planeLength || 200,
+        locked: !!body.planeLocked
+      };
+    },
+
+    // ---- Distance positioning tool methods --------------------------------
+
+    getBodyById: (networkId) => {
+      return bodyMapRef.current[networkId] || null;
+    },
+
+    setDistanceGuide: (guide) => {
+      distanceGuideRef.current = guide || null;
+    },
+
+    notifyBodiesChanged: () => {
+      if (onBodiesUpdateRef.current) {
+        onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
+      }
     }
   }));
 
@@ -2085,11 +2367,37 @@ const PhysicsCanvas = forwardRef(
         return;
       }
 
+      // Plane dragging: if we hit an unlocked plane, start plane drag
+      if (body && body.shapeType === 'plane' && !body.planeLocked) {
+        draggedPlaneRef.current = body;
+        dragPlaneOffsetRef.current = {
+          x: position.x - body.position.x,
+          y: position.y - body.position.y
+        };
+        // Prevent the MouseConstraint from grabbing this static body
+        if (mc.constraint) mc.constraint.bodyB = null;
+        setSelectedBody(body.networkId);
+        return;
+      }
+
       setSelectedBody(body ? body.networkId : null);
     };
     const onMouseMove = (e) => {
-      if (!draggedPivotAnchorRef.current) return;
       const position = (e.mouse && e.mouse.position) || mc.mouse.position;
+
+      // Handle plane dragging
+      if (draggedPlaneRef.current) {
+        const body = draggedPlaneRef.current;
+        const halfLen = (body.planeLength || 200) / 2;
+        const newX = Math.max(halfLen, Math.min(CANVAS_WIDTH - halfLen,
+          position.x - dragPlaneOffsetRef.current.x));
+        const newY = Math.max(20, Math.min(CANVAS_HEIGHT - 20,
+          position.y - dragPlaneOffsetRef.current.y));
+        Matter.Body.setPosition(body, { x: newX, y: newY });
+        return;
+      }
+
+      if (!draggedPivotAnchorRef.current) return;
       updatePivotAnchor(
         draggedPivotAnchorRef.current.constraintId,
         position,
@@ -2097,6 +2405,14 @@ const PhysicsCanvas = forwardRef(
       );
     };
     const onMouseUp = (e) => {
+      // Finish plane dragging
+      if (draggedPlaneRef.current) {
+        draggedPlaneRef.current = null;
+        dragPlaneOffsetRef.current = { x: 0, y: 0 };
+        if (mc.constraint) mc.constraint.bodyB = null;
+        return;
+      }
+
       if (!draggedPivotAnchorRef.current) return;
       const position = (e.mouse && e.mouse.position) || mc.mouse.position;
       const constraintId = draggedPivotAnchorRef.current.constraintId;
@@ -2108,6 +2424,12 @@ const PhysicsCanvas = forwardRef(
       if (draggedPivotAnchorRef.current || pivotSelectionModeRef.current) {
         draggedBodyRef.current = null;
         if (mc.constraint) mc.constraint.bodyB = null;
+        return;
+      }
+      // Prevent locked planes from being grabbed by MouseConstraint
+      if (e.body && e.body.shapeType === 'plane') {
+        if (mc.constraint) mc.constraint.bodyB = null;
+        draggedBodyRef.current = null;
         return;
       }
       draggedBodyRef.current = e.body;
