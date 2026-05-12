@@ -38,6 +38,25 @@ const DEFAULT_PIVOT_OFFSET = 120;
 const CONSTRAINT_TOLERANCE = 0.001;
 const MAX_HISTORY_ENTRIES = 50;
 
+// ---- Continuous force/velocity system constants ---------------------------
+//
+// Matter.js applies gravity as:  force = mass * gravity.y * gravity.scale
+// With gravity.y=1 and gravity.scale=0.001, gravity force = 0.001 per unit mass.
+// That represents real-world g ≈ 10 m/s².  So:
+//   1 user-Newton on 1 kg  =  (1/10) of gravity  =  0.001/10 = 0.0001 force units.
+//
+// IMPULSE mode keeps the old 0.001 scale (single-push needs a visible kick).
+// CONTINUOUS modes use the physics-correct 0.0001 so that "11 N upward"
+// barely beats "10 N gravity" (net 1 N → 1 m/s² → slow, realistic rise).
+//
+const GRAVITY_REFERENCE = 10;                             // user-facing g (m/s²)
+const MATTER_GRAVITY_SCALE = 0.001;                       // engine.gravity.scale default
+const IMPULSE_FORCE_SCALE = 0.001;                        // original scale for one-shot push
+const CONTINUOUS_FORCE_SCALE = MATTER_GRAVITY_SCALE / GRAVITY_REFERENCE; // = 0.0001
+const CONTINUOUS_VELOCITY_MAX = 20;                       // px/tick safety cap
+const DRAG_VELOCITY_CLAMP = 12;                           // max speed a dragged body can reach
+const DRAG_RELEASE_DAMPING = 0.6;                         // scale velocity on release
+
 const newNetworkId = () =>
   `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 
@@ -666,6 +685,14 @@ const PhysicsCanvas = forwardRef(
   // Whether the Matter runner is currently stopped by the toolbar.
   const isPausedRef = useRef(false);
 
+  // ---- Continuous force/velocity state ------------------------------------
+  // Holds the current active continuous effect, if any. Shape:
+  // { id, networkId, mode, applyMode, vx, vy, magnitude, startTime,
+  //   duration, continuous, rampUp, timerId }
+  const activeEffectRef = useRef(null);
+  // Unique id counter for effects so we can correlate stop calls.
+  const effectIdCounter = useRef(0);
+
   const notifyConstraintsChanged = useCallback(() => {
     if (onConstraintsUpdateRef.current) {
       onConstraintsUpdateRef.current(
@@ -1020,6 +1047,50 @@ const PhysicsCanvas = forwardRef(
       if (preview && preview.networkId) {
         const target = bodyMapRef.current[preview.networkId];
         if (target) drawForcePreview(ctx, target, preview);
+      }
+
+      // ---- Physics debug HUD (visible while a continuous effect is active) --
+      const fx = activeEffectRef.current;
+      if (fx) {
+        const debugBody = bodyMapRef.current[fx.networkId];
+        if (debugBody) {
+          const speed = Math.hypot(debugBody.velocity.x, debugBody.velocity.y);
+          const speedMs = speed * 60 / (GRID_STEP_PIXELS / GRID_METRES_PER_STEP);
+          const elapsed = ((Date.now() - fx.startTime) / 1000).toFixed(1);
+          const gravForce = (debugBody.mass * MATTER_GRAVITY_SCALE * GRAVITY_REFERENCE).toFixed(1);
+          const appliedN = fx.magnitude.toFixed(1);
+          const netN = fx.mode === 'force'
+            ? (fx.magnitude - debugBody.mass * GRAVITY_REFERENCE).toFixed(1)
+            : '—';
+
+          ctx.save();
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.3)';
+          ctx.lineWidth = 1;
+          const hx = CANVAS_WIDTH - 230, hy = 14;
+          ctx.fillRect(hx, hy, 216, 108);
+          ctx.strokeRect(hx, hy, 216, 108);
+
+          ctx.font = '10px Inter, monospace';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('PHYSICS DEBUG', hx + 6, hy + 5);
+
+          ctx.fillStyle = '#e2e8f0';
+          ctx.font = '10px monospace';
+          const lines = [
+            `Applied: ${appliedN} N  Gravity: ${gravForce} N`,
+            `Net F:   ${netN} N  (${fx.applyMode})`,
+            `Speed:   ${speedMs.toFixed(2)} m/s`,
+            `Vel px:  vx=${debugBody.velocity.x.toFixed(2)} vy=${debugBody.velocity.y.toFixed(2)}`,
+            `Mass:    ${debugBody.mass.toFixed(2)} kg`,
+            `Elapsed: ${elapsed}s  ${fx.continuous ? '∞' : fx.duration + 's'}`
+          ];
+          lines.forEach((line, i) => {
+            ctx.fillText(line, hx + 6, hy + 18 + i * 14);
+          });
+          ctx.restore();
+        }
       }
     };
 
@@ -1584,8 +1655,159 @@ const PhysicsCanvas = forwardRef(
     return null;
   }, []);
 
+  // ---- Stop any running continuous effect ---------------------------------
+  const stopContinuousEffect = useCallback(() => {
+    const fx = activeEffectRef.current;
+    if (!fx) return;
+    if (fx.timerId) clearTimeout(fx.timerId);
+    activeEffectRef.current = null;
+  }, []);
+
+  // ---- Continuous force/velocity tick — called every afterUpdate ----------
+  useEffect(() => {
+    const engine = engineRef.current;
+    if (!engine) return undefined;
+
+    const tickContinuousEffect = () => {
+      const fx = activeEffectRef.current;
+      if (!fx) return;
+
+      const body = bodyMapRef.current[fx.networkId];
+      if (!body || body.isStatic) {
+        stopContinuousEffect();
+        return;
+      }
+
+      const elapsed = (Date.now() - fx.startTime) / 1000; // seconds
+
+      // Check duration expiry (unless continuous)
+      if (!fx.continuous && fx.duration > 0 && elapsed >= fx.duration) {
+        stopContinuousEffect();
+        return;
+      }
+
+      // Calculate effective magnitude multiplier
+      let scale = 1;
+      if (fx.applyMode === 'variable') {
+        // Ramp up from 0 to peak, then ramp down to 0
+        const rampUpTime = fx.duration * fx.rampUp;
+        const rampDownStart = fx.duration * (1 - (1 - fx.rampUp) * 0.5);
+        if (fx.continuous) {
+          // In continuous variable mode, oscillate smoothly
+          const period = fx.duration || 3;
+          const phase = (elapsed % period) / period;
+          scale = Math.sin(phase * Math.PI);
+        } else if (elapsed < rampUpTime) {
+          // Smooth ease-in
+          const t = elapsed / rampUpTime;
+          scale = t * t * (3 - 2 * t); // smoothstep
+        } else if (elapsed > rampDownStart) {
+          // Smooth ease-out
+          const t = (elapsed - rampDownStart) / (fx.duration - rampDownStart);
+          const clamped = Math.min(1, Math.max(0, t));
+          scale = 1 - clamped * clamped * (3 - 2 * clamped); // inverse smoothstep
+        }
+      }
+      scale = Math.max(0, Math.min(1, scale));
+
+      if (fx.mode === 'force') {
+        // Apply continuous force every tick using the physics-correct scale.
+        // This scale is derived from Matter.js gravity so that user-Newtons
+        // relate properly to the gravitational force the engine already applies.
+        // e.g. 11 N up vs gravity 10 N down → net 1 N → gentle 1 m/s² rise.
+        const forceScale = CONTINUOUS_FORCE_SCALE;
+        Matter.Body.applyForce(body, body.position, {
+          x: fx.vx * forceScale * scale,
+          y: fx.vy * forceScale * scale
+        });
+      } else {
+        // Velocity modes: maintain or interpolate toward target.
+        // Convert user m/s to px/tick:  v_px = v_ms * (GRID_STEP_PIXELS / GRID_METRES_PER_STEP) / 60
+        const pxPerMetre = GRID_STEP_PIXELS / GRID_METRES_PER_STEP; // 50
+        const ticksPerSecond = 60;
+        const velScale = pxPerMetre / ticksPerSecond; // ~0.833 px/tick per m/s
+
+        const targetVx = fx.vx * velScale * scale;
+        const targetVy = fx.vy * velScale * scale;
+
+        if (fx.applyMode === 'continuous') {
+          // Smoothly blend current velocity toward target to avoid jerks
+          const blend = 0.12; // smoothing factor per tick
+          const newVx = body.velocity.x + (targetVx - body.velocity.x) * blend;
+          const newVy = body.velocity.y + (targetVy - body.velocity.y) * blend;
+          // Clamp to prevent runaway
+          const speed = Math.hypot(newVx, newVy);
+          if (speed > CONTINUOUS_VELOCITY_MAX) {
+            const cap = CONTINUOUS_VELOCITY_MAX / speed;
+            Matter.Body.setVelocity(body, { x: newVx * cap, y: newVy * cap });
+          } else {
+            Matter.Body.setVelocity(body, { x: newVx, y: newVy });
+          }
+        } else if (fx.applyMode === 'timed') {
+          // Gradually interpolate from starting velocity to target
+          const progress = fx.duration > 0
+            ? Math.min(1, elapsed / fx.duration)
+            : 1;
+          const t = progress * progress * (3 - 2 * progress); // smoothstep
+          const blendedVx = fx.startVx + (targetVx - fx.startVx) * t;
+          const blendedVy = fx.startVy + (targetVy - fx.startVy) * t;
+          const speed = Math.hypot(blendedVx, blendedVy);
+          if (speed > CONTINUOUS_VELOCITY_MAX) {
+            const cap = CONTINUOUS_VELOCITY_MAX / speed;
+            Matter.Body.setVelocity(body, { x: blendedVx * cap, y: blendedVy * cap });
+          } else {
+            Matter.Body.setVelocity(body, { x: blendedVx, y: blendedVy });
+          }
+        }
+      }
+    };
+
+    Matter.Events.on(engine, 'afterUpdate', tickContinuousEffect);
+    return () => {
+      Matter.Events.off(engine, 'afterUpdate', tickContinuousEffect);
+    };
+  }, [engineRef, stopContinuousEffect]);
+
+  // Cleanup continuous effect on unmount
+  useEffect(() => {
+    return () => stopContinuousEffect();
+  }, [stopContinuousEffect]);
+
+  // ---- Project vector onto tangent for pivoted bodies ---------------------
+  const projectForPivot = useCallback((networkId, vx, vy) => {
+    const body = bodyMapRef.current[networkId];
+    if (!body) return { vx, vy, blocked: false };
+
+    const pivot = findPivotForBody(networkId);
+    if (!pivot) return { vx, vy, blocked: false };
+
+    const pivotPoint = pivot.pointA || { x: body.position.x, y: body.position.y };
+    const dx = body.position.x - pivotPoint.x;
+    const dy = body.position.y - pivotPoint.y;
+    const dist = Math.hypot(dx, dy);
+    const length = typeof pivot.length === 'number' ? pivot.length : 0;
+
+    if (length <= 0.001) {
+      return { vx: 0, vy: 0, blocked: true };
+    }
+
+    if (dist > 0) {
+      const ux = dx / dist;
+      const uy = dy / dist;
+      const radial = vx * ux + vy * uy;
+      return {
+        vx: vx - radial * ux,
+        vy: vy - radial * uy,
+        blocked: false
+      };
+    }
+
+    return { vx, vy, blocked: false };
+  }, [findPivotForBody]);
+
   // Apply a force or velocity to a body at a chosen angle. Honours every
-  // constraint described in the physics spec.
+  // constraint described in the physics spec. Now supports six application
+  // modes while preserving the original impulse/instant behaviour identically.
   const applyToBody = useCallback((options) => {
     if (!options || !options.networkId) return;
     const body = bodyMapRef.current[options.networkId];
@@ -1600,57 +1822,105 @@ const PhysicsCanvas = forwardRef(
     let vx = magnitude * Math.cos(angleRad);
     let vy = -magnitude * Math.sin(angleRad);
 
-    const pivot = findPivotForBody(options.networkId);
-    if (pivot) {
-      const pivotPoint = pivot.pointA || { x: body.position.x, y: body.position.y };
-      const dx = body.position.x - pivotPoint.x;
-      const dy = body.position.y - pivotPoint.y;
-      const dist = Math.hypot(dx, dy);
-      const length = typeof pivot.length === 'number' ? pivot.length : 0;
-
-      if (length <= 0.001) {
-        // Hinge through the body's centre: the body cannot translate at all,
-        // so a linear force / velocity has no physical meaning. Bail without
-        // doing anything; the user feedback is the body simply stays put.
-        recordHistory();
-        return;
-      }
-
-      if (dist > 0) {
-        // Pendulum: project the input onto the tangent direction so the
-        // rod stays at constant length. Radial component is discarded.
-        const ux = dx / dist;
-        const uy = dy / dist;
-        const radial = vx * ux + vy * uy;
-        vx -= radial * ux;
-        vy -= radial * uy;
-      }
+    // Project onto tangent if pivoted
+    const { vx: pvx, vy: pvy, blocked } = projectForPivot(options.networkId, vx, vy);
+    if (blocked) {
+      recordHistory();
+      return;
     }
+    vx = pvx;
+    vy = pvy;
+
+    // Stop any existing continuous effect before starting a new one
+    stopContinuousEffect();
+
+    const applyMode = options.applyMode || (options.mode === 'force' ? 'impulse' : 'instant');
 
     recordHistory();
 
+    // --------------- Force Modes ---------------
     if (options.mode === 'force') {
-      // Matter.Body.applyForce takes very small numbers — a force of ~1
-      // would launch a unit-mass body across the canvas in one frame.
-      // Convert "Newtons" the user enters to engine-scale by /1000.
-      const FORCE_SCALE = 0.001;
-      Matter.Body.applyForce(body, body.position, {
-        x: vx * FORCE_SCALE,
-        y: vy * FORCE_SCALE
-      });
-    } else {
-      // Velocity mode: set velocity directly. We add to existing velocity
-      // so re-applying compounds intuitively.
-      Matter.Body.setVelocity(body, {
-        x: body.velocity.x + vx,
-        y: body.velocity.y + vy
-      });
+      if (applyMode === 'impulse') {
+        // Original behaviour: single instantaneous force.
+        // Impulse keeps the larger scale so a one-shot push is visible.
+        Matter.Body.applyForce(body, body.position, {
+          x: vx * IMPULSE_FORCE_SCALE,
+          y: vy * IMPULSE_FORCE_SCALE
+        });
+      } else {
+        // Constant or Variable: start a continuous effect
+        effectIdCounter.current += 1;
+        const effectId = effectIdCounter.current;
+        const duration = Number(options.duration) || 3;
+        const continuous = !!options.continuous;
+
+        activeEffectRef.current = {
+          id: effectId,
+          networkId: options.networkId,
+          mode: 'force',
+          applyMode,
+          vx,
+          vy,
+          magnitude,
+          startTime: Date.now(),
+          duration,
+          continuous,
+          rampUp: Number(options.rampUp) || 0.5,
+          timerId: continuous ? null : setTimeout(() => {
+            if (activeEffectRef.current && activeEffectRef.current.id === effectId) {
+              activeEffectRef.current = null;
+            }
+          }, duration * 1000)
+        };
+      }
+    }
+    // --------------- Velocity Modes ---------------
+    else {
+      if (applyMode === 'instant') {
+        // Original behaviour: set velocity directly, additive
+        Matter.Body.setVelocity(body, {
+          x: body.velocity.x + vx,
+          y: body.velocity.y + vy
+        });
+      } else {
+        // Continuous or Timed: start a continuous effect
+        effectIdCounter.current += 1;
+        const effectId = effectIdCounter.current;
+        const duration = Number(options.duration) || 3;
+        const continuous = applyMode === 'continuous' ? !!options.continuous : false;
+
+        activeEffectRef.current = {
+          id: effectId,
+          networkId: options.networkId,
+          mode: 'velocity',
+          applyMode,
+          vx,
+          vy,
+          magnitude,
+          startVx: body.velocity.x,
+          startVy: body.velocity.y,
+          startTime: Date.now(),
+          duration,
+          continuous: applyMode === 'continuous' ? (continuous || !!options.continuous) : false,
+          rampUp: 0.5,
+          timerId: (applyMode === 'continuous' && (continuous || !!options.continuous))
+            ? null
+            : setTimeout(() => {
+              if (activeEffectRef.current && activeEffectRef.current.id === effectId) {
+                activeEffectRef.current = null;
+              }
+            }, duration * 1000)
+        };
+      }
     }
 
     if (onBodiesUpdateRef.current) {
       onBodiesUpdateRef.current(Object.values(bodyMapRef.current));
     }
-  }, [findPivotForBody, recordHistory]);
+
+    // Return the effect id so the UI can show active state
+    return activeEffectRef.current ? activeEffectRef.current.id : null;
+  }, [findPivotForBody, projectForPivot, recordHistory, stopContinuousEffect]);
 
   // ---- Imperative API exposed to App.jsx ----------------------------------
 
@@ -1703,6 +1973,8 @@ const PhysicsCanvas = forwardRef(
     deleteSelected: deleteSelectedBody,
     updateBodyProperties,
     applyToBody,
+    stopContinuousForce: stopContinuousEffect,
+    getActiveEffectId: () => activeEffectRef.current ? activeEffectRef.current.id : null,
     addConstraint: (type) => createConstraint(type),
     removeConstraint: (constraintId) => removeConstraintById(constraintId, true),
     getSnapshot: () => {
@@ -1844,6 +2116,24 @@ const PhysicsCanvas = forwardRef(
       }
     };
     const onEnd = () => {
+      // Clamp release velocity to prevent flinging objects unrealistically
+      if (draggedBodyRef.current) {
+        const body = draggedBodyRef.current;
+        const speed = Math.hypot(body.velocity.x, body.velocity.y);
+        if (speed > DRAG_VELOCITY_CLAMP) {
+          const scale = DRAG_VELOCITY_CLAMP / speed;
+          Matter.Body.setVelocity(body, {
+            x: body.velocity.x * scale * DRAG_RELEASE_DAMPING,
+            y: body.velocity.y * scale * DRAG_RELEASE_DAMPING
+          });
+        } else if (speed > 0.5) {
+          // Apply light damping even below the clamp for smoother release
+          Matter.Body.setVelocity(body, {
+            x: body.velocity.x * DRAG_RELEASE_DAMPING,
+            y: body.velocity.y * DRAG_RELEASE_DAMPING
+          });
+        }
+      }
       draggedBodyRef.current = null;
     };
 

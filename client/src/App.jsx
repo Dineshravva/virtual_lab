@@ -14,6 +14,7 @@ import AnalyticsDashboard from './components/AnalyticsDashboard';
 import DataExportPanel from './components/DataExportPanel';
 import TemplateLibraryPanel from './components/TemplateLibraryPanel';
 import ExperimentLibrary from './components/ExperimentLibrary';
+import ToolsDrawer from './components/ToolsDrawer';
 import ToastContainer from './components/ToastContainer';
 import useSocket, { useSocketStatus } from './hooks/useSocket';
 import { askLabAssistant, saveExperiment } from './services/api';
@@ -41,6 +42,7 @@ function App() {
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0);
   const [activeLessonId, setActiveLessonId] = useState('pendulums');
   const [observeCount, setObserveCount] = useState(0);
+  const [activeForceId, setActiveForceId] = useState(null);
   const canvasRef = useRef(null);
 
   const dismissToast = useCallback((id) => {
@@ -120,18 +122,68 @@ function App() {
 
   const handleApplyToBody = useCallback((spec) => {
     if (!canvasRef.current || !spec) return;
-    canvasRef.current.applyToBody(spec);
-    if (spec && spec.mode === 'force') {
-      notify(
-        `Applied ${spec.magnitude.toFixed(1)} N at ${spec.angle.toFixed(0)} deg.`,
-        'success'
-      );
-    } else if (spec && spec.mode === 'velocity') {
-      notify(
-        `Applied ${spec.magnitude.toFixed(1)} m/s at ${spec.angle.toFixed(0)} deg.`,
-        'success'
-      );
+    const effectId = canvasRef.current.applyToBody(spec);
+
+    const applyMode = spec.applyMode || (spec.mode === 'force' ? 'impulse' : 'instant');
+    const isOngoing = applyMode !== 'impulse' && applyMode !== 'instant';
+
+    if (isOngoing && effectId) {
+      setActiveForceId(effectId);
+      // Poll for effect completion to clear the active state
+      const poll = setInterval(() => {
+        if (!canvasRef.current) {
+          clearInterval(poll);
+          setActiveForceId(null);
+          return;
+        }
+        const currentId = canvasRef.current.getActiveEffectId();
+        if (!currentId || currentId !== effectId) {
+          clearInterval(poll);
+          setActiveForceId(null);
+          const label = spec.mode === 'force' ? 'Force' : 'Velocity';
+          notify(`${label} effect completed.`, 'success');
+        }
+      }, 200);
+    } else {
+      setActiveForceId(null);
     }
+
+    // Show notification
+    if (spec.mode === 'force') {
+      if (applyMode === 'impulse') {
+        notify(
+          `Applied ${spec.magnitude.toFixed(1)} N impulse at ${spec.angle.toFixed(0)} deg.`,
+          'success'
+        );
+      } else {
+        const label = applyMode === 'variable' ? 'variable' : 'constant';
+        const durLabel = spec.continuous ? '(continuous)' : `for ${spec.duration}s`;
+        notify(
+          `${spec.magnitude.toFixed(1)} N ${label} force at ${spec.angle.toFixed(0)} deg ${durLabel}`,
+          'success'
+        );
+      }
+    } else if (spec.mode === 'velocity') {
+      if (applyMode === 'instant') {
+        notify(
+          `Applied ${spec.magnitude.toFixed(1)} m/s at ${spec.angle.toFixed(0)} deg.`,
+          'success'
+        );
+      } else {
+        const label = applyMode === 'timed' ? 'timed' : 'continuous';
+        const durLabel = spec.continuous ? '(continuous)' : `for ${spec.duration}s`;
+        notify(
+          `${spec.magnitude.toFixed(1)} m/s ${label} velocity at ${spec.angle.toFixed(0)} deg ${durLabel}`,
+          'success'
+        );
+      }
+    }
+  }, [notify]);
+
+  const handleStopContinuous = useCallback(() => {
+    if (canvasRef.current) canvasRef.current.stopContinuousForce();
+    setActiveForceId(null);
+    notify('Force/velocity effect stopped.', 'success');
   }, [notify]);
   const handleSetSimulationSpeed = useCallback((speed) => {
     setSimulationSpeed(speed);
@@ -404,18 +456,6 @@ function App() {
         </main>
         <aside className="w-80 bg-lab-panel border-l border-gray-800 overflow-y-auto flex-shrink-0
                           max-lg:w-full max-lg:max-h-80 max-lg:border-l-0 max-lg:border-t">
-          <GuidedLessonsPanel
-            onAddTemplate={handleAddTemplate}
-            onLessonChange={setActiveLessonId}
-          />
-          <PredictionPanel
-            activeLessonId={activeLessonId}
-            observeCount={observeCount}
-            onPlay={handlePlay}
-          />
-          <QuizPanel />
-          <GlossaryPanel />
-          <AIAssistantPanel onAsk={handleAskAssistant} />
           <ConstraintPanel
             constraints={constraints}
             activeTool={activeTool}
@@ -430,6 +470,8 @@ function App() {
             selectedBody={selectedBody}
             onPreviewChange={setForcePreview}
             onApply={handleApplyToBody}
+            onStopContinuous={handleStopContinuous}
+            activeForceId={activeForceId}
           />
           <AnalyticsDashboard
             bodies={bodies}
@@ -449,6 +491,23 @@ function App() {
           />
         </aside>
       </div>
+
+      {/* Collapsible tools drawer for learning panels */}
+      <ToolsDrawer>
+        <GuidedLessonsPanel
+          onAddTemplate={handleAddTemplate}
+          onLessonChange={setActiveLessonId}
+        />
+        <PredictionPanel
+          activeLessonId={activeLessonId}
+          observeCount={observeCount}
+          onPlay={handlePlay}
+        />
+        <QuizPanel />
+        <GlossaryPanel />
+        <AIAssistantPanel onAsk={handleAskAssistant} />
+      </ToolsDrawer>
+
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

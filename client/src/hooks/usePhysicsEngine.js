@@ -43,7 +43,13 @@ export default function usePhysicsEngine(width = 800, height = 600) {
     const mouseConstraint = Matter.MouseConstraint.create(engine, {
       mouse,
       constraint: {
-        stiffness: 0.2,
+        // Lower stiffness = softer spring between cursor and body.
+        // This prevents the body from teleporting to the cursor instantly,
+        // producing smoother, more controllable dragging.
+        stiffness: 0.08,
+        // Damping resists sudden velocity changes while dragging, removing
+        // the jittery overshoot that high-stiffness constraints produce.
+        damping: 0.12,
         render: { visible: false }
       }
     });
